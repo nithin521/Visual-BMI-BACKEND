@@ -11,7 +11,8 @@ import torch.nn as nn
 # Flask Setup
 # -----------------------------
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={r"/*": {"origins": "*"}})
+
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
