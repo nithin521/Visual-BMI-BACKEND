@@ -1,20 +1,18 @@
 ---
-title: Visual BMI Backend
-sdk: gradio
+title: Visual BMI Backend (Flask)
+sdk: docker
 ---
 
-## Visual BMI Prediction API
+## Visual BMI Prediction Backend
 
-Upload a full-body image and receive:
+Flask-based API for predicting BMI from a full-body image.
 
-- BMI value
-- BMI category
+### Endpoints
 
-### Endpoint
+- `GET /` → Health check
+- `POST /predict-image` → Image → BMI
 
-This Space acts as a backend API using Gradio.
+### Disclaimer
 
-### Intended Use
-
-Educational & research only.
-Not for medical diagnosis.
+For educational use only.
+Not medical advice.

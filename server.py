@@ -1,108 +1,23 @@
-# from flask import Flask, request, jsonify
-# from flask_cors import CORS
-# import torch
-# import torchvision.transforms as transforms
-# from PIL import Image
-# import io
-# import timm
-# import torch.nn as nn
-
-# # -----------------------------
-# # Flask Setup
-# # -----------------------------
-# app = Flask(__name__)
-# CORS(app)
-
-# DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
-# # -----------------------------
-# # Load Model
-# # -----------------------------
-# class ViTBMI(nn.Module):
-#     def __init__(self):
-#         super().__init__()
-#         self.backbone = timm.create_model(
-#             "vit_base_patch16_224",
-#             pretrained=False,
-#             num_classes=0
-#         )
-#         self.head = nn.Sequential(
-#             nn.Linear(768, 256),
-#             nn.ReLU(),
-#             nn.Linear(256, 1)
-#         )
-
-#     def forward(self, x):
-#         return self.head(self.backbone(x))
-
-# model = ViTBMI().to(DEVICE)
-# model.load_state_dict(torch.load("bmi_best_model.pt", map_location=DEVICE))
-# model.eval()
-
-# print("✅ Model loaded")
-
-# # -----------------------------
-# # Image Preprocessing
-# # -----------------------------
-# preprocess = transforms.Compose([
-#     transforms.Resize((224, 224)),
-#     transforms.ToTensor(),
-#     transforms.Normalize(
-#         mean=[0.485, 0.456, 0.406],
-#         std=[0.229, 0.224, 0.225]
-#     )
-# ])
-
-# # -----------------------------
-# # BMI Category Mapping
-# # -----------------------------
-# def bmi_category(bmi):
-#     if bmi < 18.5:
-#         return "Underweight"
-#     elif bmi < 25:
-#         return "Normal"
-#     elif bmi < 30:
-#         return "Overweight"
-#     else:
-#         return "Obese"
-
-# # -----------------------------
-# # API Endpoint
-# # -----------------------------
-# @app.route("/predict-image", methods=["POST"])
-# def predict_image():
-#     if "image" not in request.files:
-#         return jsonify({"error": "No image uploaded"}), 400
-
-#     image_file = request.files["image"]
-#     image = Image.open(io.BytesIO(image_file.read())).convert("RGB")
-#     image = preprocess(image).unsqueeze(0).to(DEVICE)
-
-#     with torch.no_grad():
-#         bmi = model(image).item()
-
-#     return jsonify({
-#         "bmi": round(bmi, 2),
-#         "category": bmi_category(bmi)
-#     })
-
-# # -----------------------------
-# # Run Server
-# # -----------------------------
-# if __name__ == "__main__":
-#     app.run(host="0.0.0.0", port=5000)
-
-
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+import requests
 import torch
 import timm
 import numpy as np
 from PIL import Image
-import gradio as gr
+import io
 import torchvision.transforms as transforms
+import cv2
+import time
 
-# ------------------------
+app = Flask(__name__)
+CORS(app)
+# Load Haar Cascade
+face_cascade = cv2.CascadeClassifier("haarcascade_frontalface_default.xml")
+
+# -----------------------
 # Load model
-# ------------------------
+# -----------------------
 DEVICE = "cpu"
 
 class ViTBMI(torch.nn.Module):
@@ -127,9 +42,9 @@ model = ViTBMI()
 model.load_state_dict(torch.load("bmi_best_model.pt", map_location="cpu"))
 model.eval()
 
-# ------------------------
+# -----------------------
 # Preprocessing
-# ------------------------
+# -----------------------
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
@@ -139,10 +54,47 @@ transform = transforms.Compose([
     )
 ])
 
-def predict_bmi(image: Image.Image):
+@app.route("/", methods=["GET"])
+def health():
+    return jsonify({"status": "Visual BMI backend running"})
+@app.route("/predict-image", methods=["POST"])
+def predict_image():
+    if "image" not in request.files:
+        return jsonify({"error": "No image uploaded"}), 400
+
+    image_bytes = request.files["image"].read()
+
+    # Convert to OpenCV format
+    np_arr = np.frombuffer(image_bytes, np.uint8)
+    img_cv = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
+    if img_cv is None:
+        return jsonify({"error": "Invalid image"}), 400
+
+    gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+
+    # 🔍 Detect faces
+    faces = face_cascade.detectMultiScale(
+        gray,
+        scaleFactor=1.3,
+        minNeighbors=5,
+        minSize=(30, 30)
+    )
+
+    # ❌ No face
+    if len(faces) == 0:
+        return jsonify({"error": "No face detected"}), 400
+
+    # ❌ Multiple faces (optional but recommended)
+    if len(faces) > 1:
+        return jsonify({"error": "Multiple faces detected"}), 400
+
+    # ✅ Continue with your model
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     image = transform(image).unsqueeze(0)
+
     with torch.no_grad():
-        bmi = model(image).item()
+        bmi = model(image).item() - 5
 
     category = (
         "Underweight" if bmi < 18.5 else
@@ -151,20 +103,166 @@ def predict_bmi(image: Image.Image):
         "Obese"
     )
 
-    return {
+    return jsonify({
         "bmi": round(bmi, 1),
         "category": category
+    })
+
+def calculate_distance(lat1, lon1, lat2, lon2):
+    """Calculate distance between two points in km"""
+    from math import radians, sin, cos, sqrt, atan2
+    
+    R = 6371  # Earth radius in km
+    
+    lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    
+    a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
+    c = 2 * atan2(sqrt(a), sqrt(1-a))
+    distance = R * c
+    
+    return f"{distance:.1f} km"
+
+
+
+def fetch_overpass(url, query):
+    """Retry Overpass API safely"""
+    for _ in range(2):  # 🔁 retry twice
+        try:
+            response = requests.get(url, params={"data": query}, timeout=10)
+
+            if response.status_code == 200:
+                return response.json()
+
+        except Exception as e:
+            print("Retrying Overpass...", str(e))
+
+        time.sleep(1)  # small delay before retry
+
+    return None
+
+
+# @app.route("/nearby-places", methods=["GET"])
+# def nearby_places():
+#     try:
+#         lat = request.args.get("lat")
+#         lng = request.args.get("lng")
+#         place_type = request.args.get("type", "gym")
+
+#         if not lat or not lng:
+#             return jsonify({"error": "Location required"}), 400
+
+#         lat = float(lat)
+#         lng = float(lng)
+
+#         # 🔹 Map types
+#         osm_tags = {
+#             "gym": "leisure=fitness_centre",
+#             "hospital": "amenity=hospital"
+#         }
+
+#         tag = osm_tags.get(place_type, "leisure=fitness_centre")
+
+#         # 🔹 Smaller radius → more stable
+#         query = f"""
+#         [out:json][timeout:20];
+#         node[{tag}](around:5000,{lat},{lng});
+#         out;
+#         """
+
+#         url = "https://overpass-api.de/api/interpreter"
+
+#         # 🔥 Use retry function
+#         data = fetch_overpass(url, query)
+
+#         # ❌ If API completely fails → DON'T crash
+#         if not data:
+#             return jsonify({"places": []})  # ✅ no error, safe fallback
+
+#         elements = data.get("elements", [])
+
+#         places = []
+#         print("Fetched elements:", len(elements))
+#         for element in elements:
+#             place_lat = element.get("lat")
+#             place_lng = element.get("lon")
+
+#             if place_lat is None or place_lng is None:
+#                 continue
+
+#             places.append({
+#                 "name": element.get("tags", {}).get("name", "Unnamed Place"),
+#                 "address": element.get("tags", {}).get("addr:full", "Address not available"),
+#                 "lat": place_lat,
+#                 "lng": place_lng,
+#                 "distance": calculate_distance(lat, lng, place_lat, place_lng)
+#             })
+
+#         # 🔥 Sort by nearest
+#         places = sorted(
+#             places,
+#             key=lambda x: float(x["distance"].split()[0])
+#         )[:5]
+
+#         return jsonify({"places": places})
+
+#     except Exception as e:
+#         print("ERROR:", str(e))
+#         return jsonify({"places": []})  # ✅ never break frontend
+    
+
+
+
+GEOAPIFY_API_KEY = "d0f4299df9714247a1c16f7742d3c71d"
+
+@app.route("/nearby-places")
+def nearby_places():
+    lat = request.args.get("lat")
+    lng = request.args.get("lng")
+    place_type = request.args.get("type", "gym")
+
+    # Map your types → Geoapify categories
+    category_map = {
+        "gym": "sport.fitness",
+        "hospital": "healthcare.hospital"
     }
 
-# ------------------------
-# Gradio API
-# ------------------------
-app = gr.Interface(
-    fn=predict_bmi,
-    inputs=gr.Image(type="pil"),
-    outputs="json",
-    title="Visual BMI Prediction API",
-    description="Upload a full-body image to estimate BMI"
-)
+    category = category_map.get(place_type, "sport.fitness")
 
-app.launch()
+    url = f"https://api.geoapify.com/v2/places?categories={category}&filter=circle:{lng},{lat},3000&limit=10&apiKey={GEOAPIFY_API_KEY}"
+
+    res = requests.get(url)
+    data = res.json()
+
+    places = []
+
+    for place in data.get("features", []):
+        props = place.get("properties", {})
+
+        places.append({
+            "name": props.get("name", "Unnamed Place"),
+            "address": props.get("formatted", "Address not available"),
+            "lat": props.get("lat"),
+            "lng": props.get("lon"),
+
+            # ✅ Geoapify place id
+            "place_id": props.get("place_id"),
+
+            # optional
+            "distance": props.get("distance"),
+            "phone": props.get("contact", {}).get("phone"),
+            "website": props.get("website"),
+            "opening_hours": props.get("opening_hours"),
+            "rating": props.get("rating"),
+            "city": props.get("city"),
+            "state": props.get("state"),
+            "postcode": props.get("postcode")
+        })
+
+    return {"places": places}
+# -----------------------
+# REQUIRED FOR HF DOCKER
+# -----------------------
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", debug=True)

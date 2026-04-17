@@ -1,13 +1,7 @@
-# flask
-# flask-cors
-# torch
-# torchvision
-# timm
-# pillow
-
+flask
+flask-cors
 torch
 torchvision
 timm
-pillow
 numpy
-gradio
+pillow
